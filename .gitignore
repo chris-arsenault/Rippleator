@@ -9,6 +9,7 @@
 # IDE files
 /.vscode/
 /.vs/
+/.idea/
 *.user
 *.suo
 *.sdf

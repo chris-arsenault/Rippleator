@@ -144,8 +144,15 @@ void ZoneManager::sliderValueChanged(juce::Slider* slider)
 
 void ZoneManager::addNewZone()
 {
-    // Create zone in chamber
-    int zoneId = chamber.addZone();
+    // Create zone in chamber with default values
+    float defaultX = 0.3f;
+    float defaultY = 0.3f;
+    float defaultWidth = 0.2f;
+    float defaultHeight = 0.2f;
+    float defaultDensity = 2.0f;
+    
+    chamber.addZone(defaultX, defaultY, defaultWidth, defaultHeight, defaultDensity);
+    int zoneId = removeButtons.size(); // Use the current number of zone controls
     
     // Create controls
     auto removeButton = std::make_unique<juce::TextButton>("Remove Zone " + juce::String(zoneId + 1));
@@ -258,6 +265,12 @@ void ZoneManager::updateZoneBounds(int index, float x1, float y1, float x2, floa
 {
     if (index >= 0 && index < densitySliders.size())
     {
-        chamber.setZoneBounds(index, x1, y1, x2, y2);
+        // Convert from (x1, y1, x2, y2) to (x, y, width, height)
+        float x = x1;
+        float y = y1;
+        float width = x2 - x1;
+        float height = y2 - y1;
+        
+        chamber.setZoneBounds(index, x, y, width, height);
     }
 }

@@ -2,8 +2,11 @@
 
 RippleatorAudioProcessorEditor::RippleatorAudioProcessorEditor(RippleatorAudioProcessor& p)
     : AudioProcessorEditor(&p), audioProcessor(p),
+      tabbedComponent(juce::TabbedButtonBar::TabsAtTop),
       chamberVisualizer(p.getChamber()),
-      zoneManager(p.getChamber())
+      zoneManager(p.getChamber()),
+      visualizationsTab(p.getChamber()),
+      tabNameResetCounter(0)
 {
     // Set up title
     titleLabel.setText("Rippleator", juce::dontSendNotification);
@@ -11,11 +14,21 @@ RippleatorAudioProcessorEditor::RippleatorAudioProcessorEditor(RippleatorAudioPr
     titleLabel.setJustificationType(juce::Justification::centred);
     addAndMakeVisible(titleLabel);
     
-    // Set up chamber visualizer
-    addAndMakeVisible(chamberVisualizer);
+    // Set up tabbed component
+    tabbedComponent.addTab("Chamber", juce::Colours::darkgrey, &chamberVisualizer, false);
+    tabbedComponent.addTab("Zones", juce::Colours::darkgrey, &zoneManager, false);
+    tabbedComponent.addTab("Visualizations", juce::Colours::darkgrey, &visualizationsTab, false);
+    tabbedComponent.setCurrentTabIndex(0);
+    addAndMakeVisible(tabbedComponent);
     
-    // Set up zone manager
-    addAndMakeVisible(zoneManager);
+    // Set up bypass button
+    bypassButton.setButtonText("Bypass Processing");
+    bypassButton.setToggleState(audioProcessor.isBypassProcessingEnabled(), juce::dontSendNotification);
+    bypassButton.onClick = [this] { 
+        bool newState = bypassButton.getToggleState();
+        audioProcessor.setBypassProcessing(newState);
+    };
+    addAndMakeVisible(bypassButton);
     
     // Set up chamber parameter controls
     densityLabel.setText("Medium Density", juce::dontSendNotification);
@@ -48,6 +61,22 @@ RippleatorAudioProcessorEditor::RippleatorAudioProcessorEditor(RippleatorAudioPr
     dampingSlider.setRange(0.0, 1.0, 0.01);
     addAndMakeVisible(dampingSlider);
     
+    outputGainLabel.setText("Output Gain", juce::dontSendNotification);
+    outputGainLabel.setFont(juce::Font(14.0f));
+    outputGainLabel.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(outputGainLabel);
+    
+    outputGainSlider.setSliderStyle(juce::Slider::LinearHorizontal);
+    outputGainSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 60, 20);
+    outputGainSlider.setRange(-20.0, 20.0, 0.1);
+    addAndMakeVisible(outputGainSlider);
+    
+    inputLevelMeter.setRange(-20.0, 0.0, 0.1);
+    addAndMakeVisible(inputLevelMeter);
+    
+    outputLevelMeter.setRange(-20.0, 0.0, 0.1);
+    addAndMakeVisible(outputLevelMeter);
+    
     // Create parameter attachments
     auto& parameters = audioProcessor.getParameters();
     densityAttachment.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
@@ -56,6 +85,8 @@ RippleatorAudioProcessorEditor::RippleatorAudioProcessorEditor(RippleatorAudioPr
         parameters, "wallReflectivity", reflectivitySlider));
     dampingAttachment.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
         parameters, "wallDamping", dampingSlider));
+    outputGainAttachment.reset(new juce::AudioProcessorValueTreeState::SliderAttachment(
+        parameters, "outputGain", outputGainSlider));
     
     // Set up microphone controls
     for (int i = 0; i < 3; ++i)
@@ -97,16 +128,31 @@ RippleatorAudioProcessorEditor::RippleatorAudioProcessorEditor(RippleatorAudioPr
             parameters, prefix + "Mute", mic.muteButton));
     }
     
-    // Set window size
-    setSize(800, 600);
+    // Enable keyboard focus to receive key events
+    setWantsKeyboardFocus(true);
     
     // Start timer for level meter updates
     startTimerHz(30); // Update 30 times per second
+    
+    // Set window size
+    setSize(800, 800);
+    
 }
 
 RippleatorAudioProcessorEditor::~RippleatorAudioProcessorEditor()
 {
     stopTimer();
+    densityAttachment.reset();
+    reflectivityAttachment.reset();
+    dampingAttachment.reset();
+    outputGainAttachment.reset();
+    for (int i = 0; i < 3; ++i)
+    {
+        auto& mic = micControls[i];
+        mic.volumeAttachment.reset();
+        mic.soloAttachment.reset();
+        mic.muteAttachment.reset();
+    }
 }
 
 void RippleatorAudioProcessorEditor::paint(juce::Graphics& g)
@@ -118,46 +164,64 @@ void RippleatorAudioProcessorEditor::resized()
 {
     auto area = getLocalBounds().reduced(10);
     
-    // Title at top
+    // Title at the top
     titleLabel.setBounds(area.removeFromTop(30));
     
-    // Chamber visualizer takes up most of the space
-    auto chamberArea = area.removeFromTop(area.getHeight() * 2/3);
-    chamberVisualizer.setBounds(chamberArea.removeFromLeft(chamberArea.getWidth() * 2/3));
+    // Add bypass button
+    bypassButton.setBounds(area.removeFromTop(30).withSizeKeepingCentre(150, 24));
     
-    // Zone manager next to chamber visualizer
-    zoneManager.setBounds(chamberArea);
+    area.removeFromTop(10); // Add some spacing
+    
+    // Tabbed component takes most of the space
+    tabbedComponent.setBounds(area.removeFromTop(400));
+    
+    area.removeFromTop(10); // Add some spacing
+    
+    // Controls at bottom
+    auto controlsArea = area;
+    
+    // First row of controls
+    auto row1 = controlsArea.removeFromTop(30);
+    densityLabel.setBounds(row1.removeFromLeft(120));
+    densitySlider.setBounds(row1.removeFromLeft(200));
     
     // Add spacing
-    area.removeFromTop(10);
+    controlsArea.removeFromTop(5);
     
-    // Chamber parameter controls
-    auto controlHeight = 24;
-    auto controlSpacing = 5;
+    // Second row of controls
+    auto row2 = controlsArea.removeFromTop(30);
+    reflectivityLabel.setBounds(row2.removeFromLeft(120));
+    reflectivitySlider.setBounds(row2.removeFromLeft(200));
     
-    auto densityArea = area.removeFromTop(controlHeight);
-    densityLabel.setBounds(densityArea.removeFromLeft(120));
-    densitySlider.setBounds(densityArea);
+    // Add spacing
+    controlsArea.removeFromTop(5);
     
-    area.removeFromTop(controlSpacing);
+    // Third row of controls
+    auto row3 = controlsArea.removeFromTop(30);
+    dampingLabel.setBounds(row3.removeFromLeft(120));
+    dampingSlider.setBounds(row3.removeFromLeft(200));
     
-    auto reflectivityArea = area.removeFromTop(controlHeight);
-    reflectivityLabel.setBounds(reflectivityArea.removeFromLeft(120));
-    reflectivitySlider.setBounds(reflectivityArea);
+    // Add spacing
+    controlsArea.removeFromTop(5);
     
-    area.removeFromTop(controlSpacing);
+    // Fourth row of controls
+    auto row4 = controlsArea.removeFromTop(30);
+    outputGainLabel.setBounds(row4.removeFromLeft(120));
+    outputGainSlider.setBounds(row4.removeFromLeft(200));
     
-    auto dampingArea = area.removeFromTop(controlHeight);
-    dampingLabel.setBounds(dampingArea.removeFromLeft(120));
-    dampingSlider.setBounds(dampingArea);
+    // Level meters
+    auto metersArea = row4.removeFromRight(200);
+    inputLevelMeter.setBounds(metersArea.removeFromLeft(90));
+    outputLevelMeter.setBounds(metersArea);
     
-    area.removeFromTop(10);
+    // Add spacing
+    controlsArea.removeFromTop(5);
     
     // Microphone controls
     for (int i = 0; i < 3; ++i)
     {
         auto& mic = micControls[i];
-        auto micArea = area.removeFromTop(controlHeight);
+        auto micArea = controlsArea.removeFromTop(30);
         
         mic.label.setBounds(micArea.removeFromLeft(60));
         
@@ -175,7 +239,7 @@ void RippleatorAudioProcessorEditor::resized()
         
         mic.volumeSlider.setBounds(micArea);
         
-        area.removeFromTop(controlSpacing);
+        controlsArea.removeFromTop(5);
     }
 }
 
@@ -190,4 +254,42 @@ void RippleatorAudioProcessorEditor::timerCallback()
     
     // Update chamber visualizer
     chamberVisualizer.repaint();
+    
+    // Update bypass button state (in case it was changed via keyboard shortcut)
+    bypassButton.setToggleState(audioProcessor.isBypassProcessingEnabled(), juce::dontSendNotification);
+    
+    // Check if we need to reset tab names (if the timer was started for that purpose)
+    if (tabNameResetCounter > 0)
+    {
+        tabNameResetCounter--;
+        if (tabNameResetCounter == 0)
+        {
+            // Reset tab names
+            tabbedComponent.setTabName(0, "Chamber");
+            tabbedComponent.setTabName(1, "Zones");
+            tabbedComponent.setTabName(2, "Visualizations");
+        }
+    }
+}
+
+bool RippleatorAudioProcessorEditor::keyPressed(const juce::KeyPress& key)
+{
+    // Toggle bypass processing with 'B' key
+    if (key.getKeyCode() == 'B')
+    {
+        bool currentBypass = audioProcessor.isBypassProcessingEnabled();
+        audioProcessor.setBypassProcessing(!currentBypass);
+        
+        // Show a message about the current state
+        juce::String message = "Processing " + juce::String(!currentBypass ? "enabled" : "bypassed");
+        tabbedComponent.setTabName(tabbedComponent.getCurrentTabIndex(), message);
+        
+        // Set counter to reset tab name after a number of timer callbacks
+        // Since timer is running at 30Hz, 60 callbacks = 2 seconds
+        tabNameResetCounter = 60;
+        
+        return true;
+    }
+    
+    return juce::Component::keyPressed(key);
 }

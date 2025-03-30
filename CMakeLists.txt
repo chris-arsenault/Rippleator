@@ -62,8 +62,13 @@ target_sources(Rippleator
         Source/PluginProcessor.cpp
         Source/PluginEditor.cpp
         Source/Models/Chamber.cpp
+        Source/Models/RayTracer.cpp
         Source/GUI/ChamberVisualizer.cpp
         Source/GUI/ZoneManager.cpp
+        Source/GUI/WaveformVisualizer.cpp
+        Source/GUI/FrequencyVisualizer.cpp
+        Source/GUI/VisualizationsTab.cpp
+        Source/GUI/LevelMeter.cpp
 )
 
 # Set include directories

@@ -2,11 +2,10 @@
 
 #include <JuceHeader.h>
 #include <vector>
-#include <array>
-#include <atomic>
 #include <memory>
+#include <array>
 #include "Zone.h"
-#include "../Utils/PhysicsHelpers.h"
+#include "RayTracer.h"
 
 /**
  * Chamber class that simulates a 2D rectangular chamber filled with multiple fluid/gas zones.
@@ -14,36 +13,10 @@
  * different mediums, with configurable speaker and microphone positions.
  */
 
-// Define MicPosition struct at global scope
-struct MicPosition {
-    float x, y;
-};
-
-// Define GridCell struct to store cell properties
-struct GridCell {
-    float pressure;          // Current pressure
-    float velocityX;         // X component of velocity
-    float velocityY;         // Y component of velocity
-    float density;           // Local medium density
-    float impedance;         // Acoustic impedance
-    float soundSpeed;        // Speed of sound in this cell
-    float damping;           // Damping factor for this cell
-    bool isWall;             // Whether this cell is a wall boundary
-    bool isZoneBoundary;     // Whether this cell is at a zone boundary
-    int zoneId;              // ID of the zone this cell belongs to (-1 for default medium)
-    
-    // Frequency domain data
-    std::vector<float> frequencyBands;    // Amplitude of different frequency bands
-    std::vector<float> frequencyPhases;   // Phase of different frequency bands
-};
-
 class Chamber
 {
 public:
-    static constexpr int GRID_WIDTH = 100;
-    static constexpr int GRID_HEIGHT = 100;
     static constexpr int FFT_SIZE = 1024;    // Size of FFT for frequency analysis
-    static constexpr int NUM_FREQUENCY_BANDS = 8;  // Number of frequency bands to analyze
     
     Chamber();
     ~Chamber();
@@ -52,9 +25,7 @@ public:
     void processBlock(const float* input, int numSamples);
     void setMicrophonePosition(int index, float x, float y);
     float getMicrophoneOutput(int index) const;
-    
-    // Grid access
-    const std::vector<float>& getGrid() const;
+    void getMicrophoneOutputBlock(int micIndex, float* outputBuffer, int numSamples) const;
     
     // Parameter setters
     void setMediumDensity(float density);
@@ -62,31 +33,74 @@ public:
     void setWallDamping(float damping);
     
     // Zone management
-    int addZone();
+    int addZone(float x1, float y1, float x2, float y2, float density);
     void removeZone(int zoneId);
+    void setZoneProperty(int index, float density);
     void setZoneDensity(int zoneId, float density);
     void setZoneBounds(int zoneId, float x1, float y1, float x2, float y2);
-    const std::vector<std::unique_ptr<Zone>>& getZones() const { return zones; }
+    const std::vector<std::unique_ptr<Zone>>& getZones() const;
     
     // Microphone management
-    const std::array<MicPosition, 3>& getMicrophonePositions() const { return micPositions; }
+    const std::array<juce::Point<float>, 3>& getMicrophonePositions() const { return micPositions; }
     
     // Speaker position
     float getSpeakerX() const { return speakerX; }
     float getSpeakerY() const { return speakerY; }
     void setSpeakerPosition(float x, float y);
-    
+    juce::Point<float> getSpeakerPosition() const;
+
+    const std::vector<Ray>& getCachedRays() const { return rayTracer.getCachedRays(); }
     bool isInitialized() const;
+    void setDefaultMediumDensity(float density);
+    float getDefaultMediumDensity() const;
+    juce::Point<float> getMicrophonePosition(int index) const;
+    
+    // Getter for microphone frequency responses (for visualization)
+    const std::array<MicFrequencyBands, 3>& getMicFrequencyResponses() const { return micFrequencyResponses; }
+    
+    // Getter for microphone output buffer (for visualization)
+    const std::array<std::vector<float>, 3>& getMicBuffers() const { return micBuffers; }
+
+    void setBypassProcessing(bool bypass);
 
 private:
-    void updateGrid(float input);
-    float sampleGrid(float x, float y) const;
-    void updateCellProperties();
-    void performFrequencyAnalysis(float input);
-    void applyFrequencyEffects();
-    bool isCellAtZoneBoundary(int x, int y) const;
-    void handleWallReflection(int x, int y);
-    void handleZoneRefraction(int x, int y);
+
+    void processAudioForMicrophones(const float* input, int numSamples);
+    
+    // Ray tracing
+    float defaultMediumDensity;
+    RayTracer rayTracer;
+    
+    // Microphone frequency responses
+    std::array<MicFrequencyBands, 3> micFrequencyResponses;
+    
+    // FFT data for each microphone
+    std::array<std::vector<std::complex<float>>, 3> micFFTData;
+    
+    // Previous phase information for phase continuity
+    std::array<std::vector<float>, 3> previousPhase;
+    
+    // Microphone output buffers
+    std::array<std::vector<float>, 3> micBuffers;
+    
+    // Current block size and sample index
+    int currentBlockSize;
+    int currentSampleIndex;
+    
+    // FFT processing control
+    int samplesSinceLastFFT;
+    int minSamplesForFFT;
+    
+    // Debug control
+    bool bypassProcessing; // When true, input is copied directly to output without processing
+    
+    // FFT objects
+    std::unique_ptr<juce::dsp::FFT> fftForward;
+    std::unique_ptr<juce::dsp::FFT> fftInverse;
+    
+    // Input buffer for FFT processing
+    std::vector<float> inputBuffer;
+    std::vector<std::complex<float>> fftWorkspace;
     
     bool initialized;
     double sampleRate;
@@ -104,11 +118,7 @@ private:
     std::vector<float> fftOutput;
     std::vector<float> windowFunction;
     int fftBufferPos;
-    
-    // Grid data
-    std::vector<float> grid;                // Visualization grid (pressure values)
-    std::vector<GridCell> cells;            // Grid cells with all properties
-    
+
     // Audio processing
     std::vector<float> fftInputBuffer;      // Buffer for FFT input
     std::vector<float> fftTimeBuffer;       // Time domain buffer
@@ -119,7 +129,7 @@ private:
     int nextZoneId;
     
     // Microphone positions (up to 3)
-    std::array<MicPosition, 3> micPositions;
+    std::array<juce::Point<float>, 3> micPositions;
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(Chamber)
 };

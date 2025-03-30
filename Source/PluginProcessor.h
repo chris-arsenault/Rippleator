@@ -42,19 +42,37 @@ public:
     juce::AudioProcessorValueTreeState& getParameters();
     
     // Get the current level for a microphone (0-1 range)
-    float getMicrophoneLevel(int micIndex) const;
+    float getMicrophoneLevel(int micIndex) const {return 0.5;}
     
     // Helper method to update microphone levels
     void updateMicrophoneLevel(int micIndex, float level);
-
-private:
-    Chamber chamber;
-    juce::AudioProcessorValueTreeState parameters;
     
-    // Level tracking for microphones
+    void setMicrophonePosition(int index, float x, float y);
+    void setMicrophoneEnabled(int index, bool enabled);
+    
+    // Debug controls
+    void setBypassProcessing(bool bypass);
+    bool isBypassProcessingEnabled() const;
+    
+private:
+    //==============================================================================
+    juce::AudioProcessorValueTreeState parameters;
+    Chamber chamber;
+    
+    juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    
     std::array<float, 3> micLevels;
     std::array<float, 3> micLevelSmoothed;
+    std::array<bool, 3> microphoneEnabled;
     float levelDecayRate;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RippleatorAudioProcessor)
+    
+    // Phase accumulators for test tone generation
+    double phase440Hz = 0.0;
+    double phase880Hz = 0.0;
+    double phase1760Hz = 0.0;
+    
+    bool bypassProcessing = false;
+    
+    //==============================================================================
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RippleatorAudioProcessor)
 };

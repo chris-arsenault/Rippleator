@@ -26,29 +26,39 @@ void ChamberVisualizer::paint(juce::Graphics& g)
     // Draw background
     g.fillAll(juce::Colours::black);
     
-    // Get chamber grid
-    const auto& grid = chamber.getGrid();
+    // Draw ray paths
+    const auto& rays = chamber.getCachedRays();
     
-    // Calculate cell size
-    float cellWidth = bounds.getWidth() / Chamber::GRID_WIDTH;
-    float cellHeight = bounds.getHeight() / Chamber::GRID_HEIGHT;
-    
-    // Draw pressure field
-    for (int y = 0; y < Chamber::GRID_HEIGHT; ++y)
+    // Draw rays with varying colors based on intensity and bounce count
+    for (const auto& ray : rays)
     {
-        for (int x = 0; x < Chamber::GRID_WIDTH; ++x)
-        {
-            float pressure = grid[y * Chamber::GRID_WIDTH + x];
+        // Skip rays with zero intensity
+        if (ray.intensity <= 0.01f)
+            continue;
             
-            // Map pressure to color
-            float normalizedPressure = (pressure + 1.0f) * 0.5f; // Map [-1,1] to [0,1]
-            normalizedPressure = juce::jlimit(0.0f, 1.0f, normalizedPressure);
+        // Calculate ray endpoint based on direction and distance
+        float rayLength = 0.1f; // Default length if distance is not set
+        if (ray.distance > 0)
+            rayLength = ray.distance;
             
-            g.setColour(colorMap.getColourAtPosition(normalizedPressure));
-            
-            // Draw cell - fill the entire cell with no gaps
-            g.fillRect(x * cellWidth, y * cellHeight, cellWidth + 0.5f, cellHeight + 0.5f);
-        }
+        juce::Point<float> rayEnd = ray.origin + ray.direction * rayLength;
+        
+        // Calculate color based on ray intensity and bounce count
+        float intensity = juce::jlimit(0.0f, 1.0f, ray.intensity);
+        float hue = 0.6f - (float)ray.bounceCount * 0.1f; // Hue shifts with bounce count
+        hue = juce::jlimit(0.0f, 1.0f, hue);
+        
+        juce::Colour rayColor = juce::Colour::fromHSV(hue, 0.8f, intensity, 0.7f);
+        
+        // Draw ray line
+        g.setColour(rayColor);
+        g.drawLine(
+            ray.origin.x * bounds.getWidth(), 
+            ray.origin.y * bounds.getHeight(),
+            rayEnd.x * bounds.getWidth(), 
+            rayEnd.y * bounds.getHeight(),
+            1.0f + intensity * 2.0f // Line thickness based on intensity
+        );
     }
     
     // Draw zone boundaries
@@ -59,36 +69,38 @@ void ChamberVisualizer::paint(juce::Graphics& g)
         const auto& zone = zones[i];
         
         // Convert zone coordinates from 0-1 range to pixel coordinates
-        float x1 = zone->x1 * bounds.getWidth();
-        float y1 = zone->y1 * bounds.getHeight();
-        float x2 = zone->x2 * bounds.getWidth();
-        float y2 = zone->y2 * bounds.getHeight();
+        float x = zone->x * bounds.getWidth();
+        float y = zone->y * bounds.getHeight();
+        float width = zone->width * bounds.getWidth();
+        float height = zone->height * bounds.getHeight();
         
         // Use different color for the zone being dragged
         if (currentDragTarget == DragTarget::ZoneCorner && i == draggedZoneIndex)
             g.setColour(juce::Colours::orange.withAlpha(0.7f));
         else
-            g.setColour(juce::Colours::white.withAlpha(0.7f));
+            g.setColour(juce::Colours::red);
             
         // Draw zone boundary rectangle
-        g.drawRect(x1, y1, x2 - x1, y2 - y1, 2.0f);
+        g.drawRect(x, y, width, height, 2.0f);
         
         // Draw corner handles
         float handleSize = 8.0f;
-        g.fillRect(x1 - handleSize/2, y1 - handleSize/2, handleSize, handleSize); // Top-left
-        g.fillRect(x2 - handleSize/2, y1 - handleSize/2, handleSize, handleSize); // Top-right
-        g.fillRect(x1 - handleSize/2, y2 - handleSize/2, handleSize, handleSize); // Bottom-left
-        g.fillRect(x2 - handleSize/2, y2 - handleSize/2, handleSize, handleSize); // Bottom-right
+        g.fillRect(x - handleSize/2, y - handleSize/2, handleSize, handleSize); // Top-left
+        g.fillRect(x + width - handleSize/2, y - handleSize/2, handleSize, handleSize); // Top-right
+        g.fillRect(x - handleSize/2, y + height - handleSize/2, handleSize, handleSize); // Bottom-left
+        g.fillRect(x + width - handleSize/2, y + height - handleSize/2, handleSize, handleSize); // Bottom-right
         
         // Add a small label showing the zone density
-        g.setFont(12.0f);
-        juce::String densityText = juce::String(zone->density, 1);
-        g.drawText(densityText, x1 + 2, y1 + 2, 30, 15, juce::Justification::left);
+        g.setFont(14.0f);
+        juce::String densityText = "D: " + juce::String(zone->density, 1);
+        g.setColour(juce::Colours::white);
+        g.drawText(densityText, x + 5, y + 5, 50, 20, juce::Justification::left);
     }
     
     // Draw speaker position
-    float speakerX = chamber.getSpeakerX() * bounds.getWidth();
-    float speakerY = chamber.getSpeakerY() * bounds.getHeight();
+    auto speakerPos = chamber.getSpeakerPosition();
+    float speakerX = speakerPos.x * bounds.getWidth();
+    float speakerY = speakerPos.y * bounds.getHeight();
     
     // Use different color for the speaker being dragged
     if (currentDragTarget == DragTarget::Speaker)
@@ -100,20 +112,25 @@ void ChamberVisualizer::paint(juce::Graphics& g)
     g.drawText("S", speakerX - 4.0f, speakerY - 15.0f, 10.0f, 10.0f, juce::Justification::centred);
     
     // Draw microphone positions
-    const auto& micPositions = chamber.getMicrophonePositions();
     for (int i = 0; i < 3; ++i)
     {
+        auto micPos = chamber.getMicrophonePosition(i);
+        float micX = micPos.x * bounds.getWidth();
+        float micY = micPos.y * bounds.getHeight();
+        
         // Use different color for the microphone being dragged
         if (currentDragTarget == DragTarget::Microphone && i == draggedMicIndex)
             g.setColour(juce::Colours::orange);
         else
             g.setColour(juce::Colours::green);
             
-        float micX = micPositions[i].x * bounds.getWidth();
-        float micY = micPositions[i].y * bounds.getHeight();
         g.fillEllipse(micX - 4.0f, micY - 4.0f, 8.0f, 8.0f);
         g.drawText(juce::String(i + 1), micX - 4.0f, micY - 15.0f, 10.0f, 10.0f, juce::Justification::centred);
     }
+    
+    // Draw chamber walls
+    g.setColour(juce::Colours::white);
+    g.drawRect(bounds, 2.0f);
 }
 
 void ChamberVisualizer::resized()
@@ -198,38 +215,44 @@ void ChamberVisualizer::mouseDrag(const juce::MouseEvent& e)
                 if (draggedZoneIndex < zones.size())
                 {
                     // Get current zone bounds
-                    float x1 = zones[draggedZoneIndex]->x1;
-                    float y1 = zones[draggedZoneIndex]->y1;
-                    float x2 = zones[draggedZoneIndex]->x2;
-                    float y2 = zones[draggedZoneIndex]->y2;
+                    float x = zones[draggedZoneIndex]->x;
+                    float y = zones[draggedZoneIndex]->y;
+                    float width = zones[draggedZoneIndex]->width;
+                    float height = zones[draggedZoneIndex]->height;
                     
                     // Update the appropriate corner
                     switch (draggedCorner)
                     {
                         case ZoneCorner::TopLeft:
-                            x1 = normX;
-                            y1 = normY;
+                            x = normX;
+                            y = normY;
                             break;
                         case ZoneCorner::TopRight:
-                            x2 = normX;
-                            y1 = normY;
+                            width = normX - x;
+                            y = normY;
                             break;
                         case ZoneCorner::BottomLeft:
-                            x1 = normX;
-                            y2 = normY;
+                            x = normX;
+                            height = normY - y;
                             break;
                         case ZoneCorner::BottomRight:
-                            x2 = normX;
-                            y2 = normY;
+                            width = normX - x;
+                            height = normY - y;
                             break;
                     }
                     
-                    // Ensure x1 < x2 and y1 < y2
-                    if (x1 > x2) std::swap(x1, x2);
-                    if (y1 > y2) std::swap(y1, y2);
+                    // Ensure width and height are positive
+                    if (width < 0) {
+                        x = x + width;
+                        width = -width;
+                    }
+                    if (height < 0) {
+                        y = y + height;
+                        height = -height;
+                    }
                     
                     // Update zone bounds
-                    chamber.setZoneBounds(draggedZoneIndex, x1, y1, x2, y2);
+                    chamber.setZoneBounds(draggedZoneIndex, x, y, width, height);
                 }
             }
             break;
@@ -257,12 +280,12 @@ void ChamberVisualizer::mouseUp(const juce::MouseEvent& e)
 int ChamberVisualizer::getMicrophoneAtPosition(const juce::Point<float>& position)
 {
     auto bounds = getLocalBounds().toFloat();
-    const auto& micPositions = chamber.getMicrophonePositions();
     
     for (int i = 0; i < 3; ++i)
     {
-        float micX = micPositions[i].x * bounds.getWidth();
-        float micY = micPositions[i].y * bounds.getHeight();
+        auto micPos = chamber.getMicrophonePosition(i);
+        float micX = micPos.x * bounds.getWidth();
+        float micY = micPos.y * bounds.getHeight();
         
         // Check if position is within the microphone circle (radius 8)
         float distance = std::sqrt(std::pow(position.x - micX, 2) + std::pow(position.y - micY, 2));
@@ -278,8 +301,9 @@ int ChamberVisualizer::getMicrophoneAtPosition(const juce::Point<float>& positio
 bool ChamberVisualizer::isSpeakerAtPosition(const juce::Point<float>& position)
 {
     auto bounds = getLocalBounds().toFloat();
-    float speakerX = chamber.getSpeakerX() * bounds.getWidth();
-    float speakerY = chamber.getSpeakerY() * bounds.getHeight();
+    auto speakerPos = chamber.getSpeakerPosition();
+    float speakerX = speakerPos.x * bounds.getWidth();
+    float speakerY = speakerPos.y * bounds.getHeight();
     
     // Check if position is within the speaker circle (radius 10)
     float distance = std::sqrt(std::pow(position.x - speakerX, 2) + std::pow(position.y - speakerY, 2));
@@ -299,14 +323,14 @@ bool ChamberVisualizer::getZoneCornerAtPosition(const juce::Point<float>& positi
         const auto& zone = zones[i];
         
         // Convert zone coordinates from 0-1 range to pixel coordinates
-        float x1 = zone->x1 * bounds.getWidth();
-        float y1 = zone->y1 * bounds.getHeight();
-        float x2 = zone->x2 * bounds.getWidth();
-        float y2 = zone->y2 * bounds.getHeight();
+        float x = zone->x * bounds.getWidth();
+        float y = zone->y * bounds.getHeight();
+        float width = zone->width * bounds.getWidth();
+        float height = zone->height * bounds.getHeight();
         
         // Check top-left corner
-        if (position.x >= x1 - handleSize/2 && position.x <= x1 + handleSize/2 &&
-            position.y >= y1 - handleSize/2 && position.y <= y1 + handleSize/2)
+        if (position.x >= x - handleSize/2 && position.x <= x + handleSize/2 &&
+            position.y >= y - handleSize/2 && position.y <= y + handleSize/2)
         {
             zoneIndex = i;
             corner = ZoneCorner::TopLeft;
@@ -314,8 +338,8 @@ bool ChamberVisualizer::getZoneCornerAtPosition(const juce::Point<float>& positi
         }
         
         // Check top-right corner
-        if (position.x >= x2 - handleSize/2 && position.x <= x2 + handleSize/2 &&
-            position.y >= y1 - handleSize/2 && position.y <= y1 + handleSize/2)
+        if (position.x >= x + width - handleSize/2 && position.x <= x + width + handleSize/2 &&
+            position.y >= y - handleSize/2 && position.y <= y + handleSize/2)
         {
             zoneIndex = i;
             corner = ZoneCorner::TopRight;
@@ -323,8 +347,8 @@ bool ChamberVisualizer::getZoneCornerAtPosition(const juce::Point<float>& positi
         }
         
         // Check bottom-left corner
-        if (position.x >= x1 - handleSize/2 && position.x <= x1 + handleSize/2 &&
-            position.y >= y2 - handleSize/2 && position.y <= y2 + handleSize/2)
+        if (position.x >= x - handleSize/2 && position.x <= x + handleSize/2 &&
+            position.y >= y + height - handleSize/2 && position.y <= y + height + handleSize/2)
         {
             zoneIndex = i;
             corner = ZoneCorner::BottomLeft;
@@ -332,8 +356,8 @@ bool ChamberVisualizer::getZoneCornerAtPosition(const juce::Point<float>& positi
         }
         
         // Check bottom-right corner
-        if (position.x >= x2 - handleSize/2 && position.x <= x2 + handleSize/2 &&
-            position.y >= y2 - handleSize/2 && position.y <= y2 + handleSize/2)
+        if (position.x >= x + width - handleSize/2 && position.x <= x + width + handleSize/2 &&
+            position.y >= y + height - handleSize/2 && position.y <= y + height + handleSize/2)
         {
             zoneIndex = i;
             corner = ZoneCorner::BottomRight;

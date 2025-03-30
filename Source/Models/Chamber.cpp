@@ -1,671 +1,420 @@
 #include "Chamber.h"
+#include "../DebugLogger.h"
 
+// Define M_PI if not already defined
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+// Constructor
 Chamber::Chamber()
-    : initialized(false),
-      sampleRate(44100.0),
-      speakerX(0.5f),
+    : speakerX(0.5f),
       speakerY(0.5f),
-      mediumDensity(1.0f),
-      wallReflectivity(0.5f),
-      wallDamping(0.1f),
-      nextZoneId(0),
-      micPositions{{{0.25f, 0.25f}, {0.5f, 0.5f}, {0.75f, 0.75f}}},
+      initialized(false),
+      sampleRate(44100.0),
+      currentBlockSize(0),
+      currentSampleIndex(0),
+      samplesSinceLastFFT(0),
+      minSamplesForFFT(0), // Will be calculated in initialize()
+      bypassProcessing(false), // Initialize to false by default
       fftSize(1024),
-      fftData(fftSize * 2, 0.0f),
-      fftOutput(fftSize * 2, 0.0f),
-      windowFunction(fftSize),
-      fftBufferPos(0)
+      fftBufferPos(0),
+      defaultMediumDensity(1.0f) // Initialize default medium density
 {
-    // Initialize visualization grid
-    grid.resize(GRID_WIDTH * GRID_HEIGHT, 0.0f);
+    DebugLogger::logWithCategory("CHAMBER", "Chamber constructor called");
+
+    // Initialize microphone positions
+    micPositions[0] = juce::Point<float>(0.2f, 0.2f);
+    micPositions[1] = juce::Point<float>(0.8f, 0.2f);
+    micPositions[2] = juce::Point<float>(0.5f, 0.8f);
     
-    // Initialize grid cells
-    cells.resize(GRID_WIDTH * GRID_HEIGHT);
-    
-    // Initialize FFT objects
-    for (int i = 0; i < fftSize; ++i)
-    {
-        // Hann window
-        windowFunction[i] = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * i / (fftSize - 1)));
+    // Initialize microphone buffers
+    for (int i = 0; i < 3; ++i) {
+        micBuffers[i].resize(1024, 0.0f);
+        micFrequencyResponses[i] = MicFrequencyBands();
+        micFFTData[i].resize(FFT_SIZE, std::complex<float>(0.0f, 0.0f));
+        previousPhase[i].resize(FFT_SIZE, 0.0f);
     }
     
-    // Initialize all cells with default properties
-    updateCellProperties();
+    // Initialize FFT-related members
+    inputBuffer.resize(FFT_SIZE, 0.0f);
+    fftWorkspace.resize(FFT_SIZE, std::complex<float>(0.0f, 0.0f));
+    fftData.resize(FFT_SIZE * 2, 0.0f); // Double size for real/imaginary parts
+    fftOutput.resize(FFT_SIZE, 0.0f);
+    windowFunction.resize(FFT_SIZE, 0.0f);
+    
+    // Create Hann window function
+    for (int i = 0; i < FFT_SIZE; ++i) {
+        windowFunction[i] = 0.5f * (1.0f - std::cos(2.0f * M_PI * i / (FFT_SIZE - 1)));
+    }
+    
+    // Initialize FFT objects
+    fftForward = std::make_unique<juce::dsp::FFT>(std::log2(FFT_SIZE));
+    fftInverse = std::make_unique<juce::dsp::FFT>(std::log2(FFT_SIZE));
+
+    rayTracer.initialize(this);
+    
+    DebugLogger::logWithCategory("CHAMBER", "Chamber constructor completed");
 }
 
 Chamber::~Chamber()
 {
+    // Clean up any resources
 }
 
-void Chamber::initialize(double newSampleRate, float newSpeakerX, float newSpeakerY)
+void Chamber::initialize(double sampleRate, float speakerX, float speakerY)
 {
-    this->sampleRate = newSampleRate;
-    this->speakerX = newSpeakerX;
-    this->speakerY = newSpeakerY;
+    DebugLogger::logWithCategory("CHAMBER", "Chamber initialize called with sampleRate: " + 
+                                 std::to_string(sampleRate) + ", speakerX: " + 
+                                 std::to_string(speakerX) + ", speakerY: " + 
+                                 std::to_string(speakerY));
     
-    // Initialize the grid cells
-    cells.resize(GRID_WIDTH * GRID_HEIGHT);
-    grid.resize(GRID_WIDTH * GRID_HEIGHT, 0.0f);
+    this->sampleRate = sampleRate;
+    setSpeakerPosition(speakerX, speakerY);
     
-    // Initialize FFT objects
-    fftSize = 1024;
-    fftData.resize(fftSize * 2, 0.0f);
-    fftOutput.resize(fftSize * 2, 0.0f);
+    // Calculate minimum samples needed for FFT processing
+    // For a good frequency resolution down to 50Hz, we need at least sampleRate / 50 samples
+    // But we also want to keep latency low, so we'll use a fraction of that
+    minSamplesForFFT = static_cast<int>(sampleRate / 50.0 / 4.0); // 1/4 of the samples needed for 50Hz resolution
     
-    // Initialize the window function
-    windowFunction.resize(fftSize);
-    for (int i = 0; i < fftSize; ++i)
-    {
-        // Hann window
-        windowFunction[i] = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * i / (fftSize - 1)));
-    }
+    // Ensure it's not too small or too large
+    minSamplesForFFT = juce::jlimit(256, FFT_SIZE / 2, minSamplesForFFT);
     
-    // Default microphone positions
-    micPositions[0] = {0.25f, 0.25f};
-    micPositions[1] = {0.5f, 0.5f};
-    micPositions[2] = {0.75f, 0.75f};
+    DebugLogger::logWithCategory("CHAMBER", "Minimum samples for FFT set to: " + std::to_string(minSamplesForFFT));
     
-    // Initialize all cells with default properties
-    updateCellProperties();
+    // Reset FFT sample counter
+    samplesSinceLastFFT = 0;
+
+    //Recalc rays and store frequency responses
+    micFrequencyResponses = rayTracer.updateRayCache();
     
     initialized = true;
+    
+    DebugLogger::logWithCategory("CHAMBER", "Chamber initialization completed");
 }
 
-void Chamber::setMediumDensity(float density)
+void Chamber::setSpeakerPosition(float x, float y)
 {
-    mediumDensity = density;
-    updateCellProperties();
+    DebugLogger::logWithCategory("CHAMBER", "Setting speaker position to (" + 
+                                 std::to_string(x) + ", " + std::to_string(y) + ")");
+    
+    // Clamp to 0-1 range
+    x = juce::jlimit(0.0f, 1.0f, x);
+    y = juce::jlimit(0.0f, 1.0f, y);
+    
+    speakerX = x;
+    speakerY = y;
+
+    //Recalc rays and store frequency responses
+    micFrequencyResponses = rayTracer.updateRayCache();
 }
 
-void Chamber::setWallReflectivity(float reflectivity)
+void Chamber::setMicrophonePosition(int index, float x, float y)
 {
-    wallReflectivity = reflectivity;
-    updateCellProperties();
+    if (index < 0 || index >= 3)
+        return;
+    
+    DebugLogger::logWithCategory("CHAMBER", "Setting microphone " + std::to_string(index) + 
+                                 " position to (" + std::to_string(x) + ", " + 
+                                 std::to_string(y) + ")");
+    
+    // Clamp to 0-1 range
+    x = juce::jlimit(0.0f, 1.0f, x);
+    y = juce::jlimit(0.0f, 1.0f, y);
+    
+    micPositions[index] = {x, y};
+
+    //Recalc rays and store frequency responses
+    micFrequencyResponses = rayTracer.updateRayCache();
 }
 
-void Chamber::setWallDamping(float damping)
+void Chamber::setBypassProcessing(bool bypass)
 {
-    wallDamping = damping;
-    updateCellProperties();
+    bypassProcessing = bypass;
 }
 
-const std::vector<float>& Chamber::getGrid() const
+void Chamber::processBlock(const float* input, int numSamples)
 {
-    return grid;
+    if (!initialized)
+    {
+        DebugLogger::logWithCategory("ERROR", "Chamber not initialized before processBlock call");
+        return;
+    }
+    
+    if (bypassProcessing)
+    {
+        // If bypass is enabled, just copy the input to the output
+        for (int i = 0; i < 3; ++i) {
+            if (micBuffers[i].size() < static_cast<size_t>(numSamples)) {
+                micBuffers[i].resize(numSamples, 0.0f);
+            }
+            std::copy(input, input + numSamples, micBuffers[i].begin());
+        }
+        return;
+    }
+    
+    // Resize microphone buffers if needed
+    for (int i = 0; i < 3; ++i) {
+        if (micBuffers[i].size() < static_cast<size_t>(numSamples)) {
+            micBuffers[i].resize(numSamples, 0.0f);
+        }
+        std::fill(micBuffers[i].begin(), micBuffers[i].end(), 0.0f);
+    }
+    
+    // Update current block size
+    currentBlockSize = numSamples;
+    
+    // Process audio for each microphone in one pass
+    processAudioForMicrophones(input, numSamples);
 }
+
+void Chamber::processAudioForMicrophones(const float* input, int numSamples)
+{
+    DebugLogger::logWithCategory("CHAMBER", "Processing audio for microphones");
+    
+    // Copy input to buffer with overlap
+    for (int i = 0; i < numSamples; ++i) {
+        inputBuffer[fftBufferPos] = input[i];
+        fftBufferPos = (fftBufferPos + 1) % FFT_SIZE;
+    }
+    
+    // Increment the sample counter
+    samplesSinceLastFFT += numSamples;
+    
+    // Only process FFT if we've accumulated enough samples since the last processing
+    // This ensures we have enough data for proper frequency domain conversion
+    bool shouldProcessFFT = samplesSinceLastFFT >= minSamplesForFFT;
+    
+    if (shouldProcessFFT) {
+        DebugLogger::logWithCategory("CHAMBER", "Processing FFT after " + 
+                                    std::to_string(samplesSinceLastFFT) + " samples");
+        
+        // Reset the counter
+        samplesSinceLastFFT = 0;
+        
+        // Process each microphone
+        for (int mic = 0; mic < 3; ++mic) {
+            // Prepare FFT input buffer with windowing
+            for (int i = 0; i < FFT_SIZE; ++i) {
+                int bufferIndex = (fftBufferPos - numSamples + i + FFT_SIZE) % FFT_SIZE;
+                fftWorkspace[i] = std::complex<float>(inputBuffer[bufferIndex] * windowFunction[i], 0.0f);
+            }
+            
+            // Perform forward FFT
+            fftForward->perform(fftWorkspace.data(), fftWorkspace.data(), false);
+            
+            // Apply frequency-specific attenuation while preserving phase
+            for (int i = 0; i < FFT_SIZE / 2; ++i) {
+                // Map FFT bin to frequency band
+                float frequency = i * (static_cast<float>(sampleRate) / FFT_SIZE);
+
+                // Get attenuation for this frequency band
+                float attenuation = micFrequencyResponses[mic].getBandForFrequency(frequency).value;
+                
+                // Extract magnitude and phase
+                float magnitude = std::abs(fftWorkspace[i]);
+                float phase = std::arg(fftWorkspace[i]);
+                
+                // Calculate phase difference from previous block for phase continuity
+                float phaseDelta = phase - previousPhase[mic][i];
+                
+                // Unwrap phase to avoid discontinuities
+                while (phaseDelta > M_PI) phaseDelta -= 2.0f * M_PI;
+                while (phaseDelta < -M_PI) phaseDelta += 2.0f * M_PI;
+                
+                // Update phase with smooth transition
+                phase = previousPhase[mic][i] + phaseDelta;
+                
+                // Store current phase for next block
+                previousPhase[mic][i] = phase;
+                
+                // Apply attenuation to magnitude only
+                magnitude *= attenuation;
+                
+                // Convert back to complex using preserved phase
+                fftWorkspace[i] = std::polar(magnitude, phase);
+                
+                // Handle the symmetrical part (except DC and Nyquist)
+                if (i > 0 && i < FFT_SIZE / 2) {
+                    // For the symmetrical part, we need conjugate symmetry
+                    float symmetricalPhase = -phase; // Conjugate phase
+                    
+                    // Store phase for symmetrical component
+                    previousPhase[mic][FFT_SIZE - i] = symmetricalPhase;
+                    
+                    // Apply attenuation and set with conjugate phase
+                    fftWorkspace[FFT_SIZE - i] = std::polar(magnitude, symmetricalPhase);
+                }
+            }
+            
+            // Perform inverse FFT to get time-domain signal
+            fftInverse->perform(fftWorkspace.data(), fftWorkspace.data(), true);
+            
+            // Extract real part and apply window function to reduce artifacts
+            // Only extract the last numSamples values that correspond to our input block
+            for (int i = 0; i < numSamples; ++i) {
+                // Calculate the correct index in the FFT output
+                int fftIndex = FFT_SIZE - numSamples + i;
+                
+                // Apply window function and scale
+                float sample = fftWorkspace[fftIndex].real() * windowFunction[fftIndex] / FFT_SIZE;
+                
+                // Apply a gentle soft-clipping to prevent harsh digital distortion
+                sample = std::tanh(sample * 0.8f);
+                
+                // Store the output in the buffer
+                micBuffers[mic][i] = sample;
+            }
+        }
+    } else {
+        // If we're not processing FFT this time, we still need to fill the output buffers
+        // We'll use the previous output values to avoid discontinuities
+
+        // For each microphone, copy the last processed samples
+        for (int mic = 0; mic < 3; ++mic) {
+            // If we have previous samples, use them
+            if (!micBuffers[mic].empty()) {
+                // Get the last sample value for smooth transition
+                float lastSample = micBuffers[mic].back();
+
+                // Fill the buffer with a smooth decay from the last sample
+                for (int i = 0; i < numSamples; ++i) {
+                    // Apply a gentle decay to avoid clicks
+                    float decayFactor = std::pow(0.99f, static_cast<float>(i));
+                    micBuffers[mic][i] = lastSample * decayFactor;
+                }
+            }
+        }
+    }
+    
+    DebugLogger::logWithCategory("CHAMBER", "Audio processing for microphones completed");
+}
+
+void Chamber::getMicrophoneOutputBlock(int micIndex, float* outputBuffer, int numSamples) const
+{
+    if (micIndex < 0 || micIndex >= 3 || !outputBuffer)
+        return;
+    
+    DebugLogger::logWithCategory("CHAMBER", "Getting microphone output block for microphone " + std::to_string(micIndex));
+    
+    // Copy the pre-calculated microphone output directly from the buffer
+    // This is more efficient than calling getMicrophoneOutput for each sample
+    const int samplesToCopy = std::min(numSamples, currentBlockSize);
+    if (samplesToCopy > 0 && micBuffers[micIndex].size() >= static_cast<size_t>(samplesToCopy)) {
+        std::copy(micBuffers[micIndex].begin(), 
+                 micBuffers[micIndex].begin() + samplesToCopy, 
+                 outputBuffer);
+    } else {
+        // Zero out the buffer if we don't have valid data
+        std::fill(outputBuffer, outputBuffer + numSamples, 0.0f);
+    }
+    
+    DebugLogger::logWithCategory("CHAMBER", "Microphone output block retrieved");
+}
+
+juce::Point<float> Chamber::getSpeakerPosition() const
+{
+    return juce::Point<float>(speakerX, speakerY);
+}
+
+juce::Point<float> Chamber::getMicrophonePosition(int index) const
+{
+    if (index >= 0 && index < 3)
+        return micPositions[index];
+    
+    // Return a default position if index is out of range
+    return {0.5f, 0.5f};
+}
+
+int Chamber::addZone(float x, float y, float width, float height, float density)
+{
+    DebugLogger::logWithCategory("CHAMBER", "Adding zone at (" + std::to_string(x) + ", " + std::to_string(y) + 
+                                 ") with width " + std::to_string(width) + ", height " + std::to_string(height) + 
+                                 ", and density " + std::to_string(density));
+    
+    auto zone = std::make_unique<Zone>();
+    zone->x = x;
+    zone->y = y;
+    zone->width = width;
+    zone->height = height;
+    zone->density = density;
+    
+    zones.push_back(std::move(zone));
+
+    //Recalc rays and store frequency responses
+    micFrequencyResponses = rayTracer.updateRayCache();
+
+    DebugLogger::logWithCategory("CHAMBER", "Zone added");
+    
+    return zones.size() - 1;
+}
+
+void Chamber::removeZone(int index)
+{
+    if (index >= 0 && index < zones.size())
+    {
+        DebugLogger::logWithCategory("CHAMBER", "Removing zone at index " + std::to_string(index));
+        
+        zones.erase(zones.begin() + index);
+
+        //Recalc rays and store frequency responses
+        micFrequencyResponses = rayTracer.updateRayCache();
+    }
+}
+
+void Chamber::setZoneDensity(int index, float density)
+{
+    if (index >= 0 && index < zones.size())
+    {
+        DebugLogger::logWithCategory("CHAMBER", "Setting zone density at index " + std::to_string(index) + 
+                                     " to " + std::to_string(density));
+        
+        zones[index]->density = density;
+
+        //Recalc rays and store frequency responses
+        micFrequencyResponses = rayTracer.updateRayCache();
+    }
+}
+
+void Chamber::setZoneBounds(int index, float x, float y, float width, float height)
+{
+    if (index >= 0 && index < zones.size())
+    {
+        DebugLogger::logWithCategory("CHAMBER", "Setting zone bounds at index " + std::to_string(index) + 
+                                     " to (" + std::to_string(x) + ", " + std::to_string(y) + 
+                                     ") with width " + std::to_string(width) + ", height " + std::to_string(height));
+        
+        zones[index]->x = juce::jlimit(0.0f, 1.0f, x);
+        zones[index]->y = juce::jlimit(0.0f, 1.0f, y);
+        zones[index]->width = juce::jlimit(0.0f, 1.0f - zones[index]->x, width);
+        zones[index]->height = juce::jlimit(0.0f, 1.0f - zones[index]->y, height);
+
+        //Recalc rays and store frequency responses
+        micFrequencyResponses = rayTracer.updateRayCache();
+    }
+}
+
+const std::vector<std::unique_ptr<Zone>>& Chamber::getZones() const
+{
+    return zones;
+}
+
 
 bool Chamber::isInitialized() const
 {
     return initialized;
 }
 
-int Chamber::addZone()
+void Chamber::setDefaultMediumDensity(float density)
 {
-    auto zone = std::make_unique<Zone>();
-    int zoneId = nextZoneId++;
-    zones.push_back(std::move(zone));
-    updateCellProperties();
-    return zoneId;
+    DebugLogger::logWithCategory("CHAMBER", "Setting default medium density to " + std::to_string(density));
+    defaultMediumDensity = density;
+
+    //Recalc rays and store frequency responses
+    micFrequencyResponses = rayTracer.updateRayCache();
 }
 
-void Chamber::removeZone(int zoneId)
+float Chamber::getDefaultMediumDensity() const
 {
-    if (zoneId >= 0 && zoneId < zones.size())
-    {
-        zones.erase(zones.begin() + zoneId);
-        updateCellProperties();
-    }
-}
-
-void Chamber::setZoneDensity(int zoneId, float density)
-{
-    if (zoneId >= 0 && zoneId < zones.size())
-    {
-        zones[zoneId]->density = density;
-        updateCellProperties();
-    }
-}
-
-void Chamber::setZoneBounds(int zoneId, float x1, float y1, float x2, float y2)
-{
-    if (zoneId >= 0 && zoneId < zones.size())
-    {
-        auto& zone = zones[zoneId];
-        zone->x1 = x1;
-        zone->y1 = y1;
-        zone->x2 = x2;
-        zone->y2 = y2;
-        updateCellProperties();
-    }
-}
-
-void Chamber::processBlock(const float* input, int numSamples)
-{
-    if (!initialized)
-        return;
-
-    // Process each sample
-    for (int i = 0; i < numSamples; ++i)
-    {
-        // Apply a simple pre-filter to the input to reduce high-frequency content
-        // that could cause aliasing in the simulation
-        static float lastInput = 0.0f;
-        float filteredInput = 0.7f * input[i] + 0.3f * lastInput;
-        lastInput = input[i];
-        
-        // Perform frequency analysis on the filtered input
-        performFrequencyAnalysis(filteredInput);
-        
-        // Update the grid with the current filtered input sample
-        updateGrid(filteredInput);
-    }
-}
-
-void Chamber::performFrequencyAnalysis(float input)
-{
-    // Add the input sample to the FFT buffer
-    fftData[fftBufferPos] = input;
-    fftBufferPos = (fftBufferPos + 1) % fftSize;
-    
-    // When the buffer is full, perform FFT analysis
-    if (fftBufferPos == 0)
-    {
-        // Prepare the FFT input (real part in even indices, imaginary part in odd indices)
-        for (int i = 0; i < fftSize; ++i)
-        {
-            // Apply a Hanning window to reduce spectral leakage
-            fftData[i * 2] = fftData[i] * windowFunction[i];
-            fftData[i * 2 + 1] = 0.0f;  // Imaginary part is zero for time domain
-        }
-        
-        // Perform forward FFT
-        // forwardFFT.performRealOnlyForwardTransform(fftData.data(), true);
-        
-        // Copy FFT data to frequency buffer for later use
-        fftOutput = fftData;
-        
-        // Extract frequency band data (simplistic approach - divide spectrum into bands)
-        int bandsPerBin = fftSize / (2 * NUM_FREQUENCY_BANDS);
-        
-        // Calculate speaker position index
-        int speakerIdxX = static_cast<int>(speakerX * GRID_WIDTH);
-        int speakerIdxY = static_cast<int>(speakerY * GRID_HEIGHT);
-        int speakerIdx = speakerIdxY * GRID_WIDTH + speakerIdxX;
-        
-        // Update frequency data for the speaker cell
-        for (int band = 0; band < NUM_FREQUENCY_BANDS; ++band)
-        {
-            float bandAmplitude = 0.0f;
-            float bandPhase = 0.0f;
-            
-            // Average amplitude and phase across the band
-            for (int bin = band * bandsPerBin; bin < (band + 1) * bandsPerBin; ++bin)
-            {
-                int realIdx = bin * 2;
-                int imagIdx = bin * 2 + 1;
-                
-                float real = fftOutput[realIdx];
-                float imag = fftOutput[imagIdx];
-                
-                float amplitude = std::sqrt(real * real + imag * imag);
-                float phase = std::atan2(imag, real);
-                
-                bandAmplitude += amplitude;
-                bandPhase += phase;
-            }
-            
-            bandAmplitude /= bandsPerBin;
-            bandPhase /= bandsPerBin;
-            
-            // Store band data in speaker cell
-            cells[speakerIdx].frequencyBands[band] = bandAmplitude;
-            cells[speakerIdx].frequencyPhases[band] = bandPhase;
-        }
-    }
-}
-
-void Chamber::updateGrid(float input)
-{
-    // Wave equation simulation with improved physics
-    const float dt = 1.0f / static_cast<float>(sampleRate);
-    const float dx = 1.0f / static_cast<float>(GRID_WIDTH);
-    
-    // Apply input at speaker position - recalculate the index each time to ensure it's current
-    int speakerIdxX = static_cast<int>(speakerX * GRID_WIDTH);
-    int speakerIdxY = static_cast<int>(speakerY * GRID_HEIGHT);
-    int speakerIdx = speakerIdxY * GRID_WIDTH + speakerIdxX;
-    
-    // Scale the input to prevent clipping and ensure it's properly connected to the audio input
-    // Use a gentler scaling and apply a soft-clipping to prevent harsh digital artifacts
-    float scaledInput = std::tanh(input * 10.0f) * 15.0f;
-    
-    // Add input at the speaker position
-    cells[speakerIdx].pressure += scaledInput;
-    
-    // Apply frequency-dependent effects
-    applyFrequencyEffects();
-    
-    // First pass: Update velocity field based on pressure gradient
-    for (int y = 1; y < GRID_HEIGHT - 1; ++y)
-    {
-        for (int x = 1; x < GRID_WIDTH - 1; ++x)
-        {
-            const int idx = y * GRID_WIDTH + x;
-            auto& cell = cells[idx];
-            
-            if (cell.isWall)
-                continue;
-            
-            // Get neighboring cells
-            const auto& cellLeft = cells[idx - 1];
-            const auto& cellRight = cells[idx + 1];
-            const auto& cellUp = cells[idx - GRID_WIDTH];
-            const auto& cellDown = cells[idx + GRID_WIDTH];
-            
-            // Calculate pressure gradients
-            float pressureGradientX = (cellRight.pressure - cellLeft.pressure) / (2.0f * dx);
-            float pressureGradientY = (cellDown.pressure - cellUp.pressure) / (2.0f * dx);
-            
-            // Update velocity based on pressure gradient
-            cell.velocityX = cell.velocityX * (1.0f - cell.damping * 0.1f) - 
-                           (dt / (cell.density * dx)) * pressureGradientX;
-            
-            cell.velocityY = cell.velocityY * (1.0f - cell.damping * 0.1f) - 
-                           (dt / (cell.density * dx)) * pressureGradientY;
-            
-            // Handle wall reflections
-            if (x == 1 || x == GRID_WIDTH - 2 || y == 1 || y == GRID_HEIGHT - 2)
-            {
-                handleWallReflection(x, y);
-            }
-            
-            // Handle zone boundaries (refraction)
-            if (cell.isZoneBoundary)
-            {
-                handleZoneRefraction(x, y);
-            }
-        }
-    }
-    
-    // Second pass: Update pressure based on velocity divergence
-    for (int y = 1; y < GRID_HEIGHT - 1; ++y)
-    {
-        for (int x = 1; x < GRID_WIDTH - 1; ++x)
-        {
-            const int idx = y * GRID_WIDTH + x;
-            auto& cell = cells[idx];
-            
-            if (cell.isWall)
-                continue;
-            
-            // Get neighboring cells
-            const auto& cellLeft = cells[idx - 1];
-            const auto& cellRight = cells[idx + 1];
-            const auto& cellUp = cells[idx - GRID_WIDTH];
-            const auto& cellDown = cells[idx + GRID_WIDTH];
-            
-            // Calculate velocity divergence
-            float velocityDivergence = (cellRight.velocityX - cellLeft.velocityX) / (2.0f * dx) +
-                                     (cellDown.velocityY - cellUp.velocityY) / (2.0f * dx);
-            
-            // Update pressure based on velocity divergence and local sound speed
-            cell.pressure = cell.pressure * (0.9999f - cell.damping * 0.01f) - 
-                         cell.density * cell.soundSpeed * cell.soundSpeed * dt * velocityDivergence;
-            
-            // Apply additional damping at boundaries
-            if (x == 1 || x == GRID_WIDTH - 2 || y == 1 || y == GRID_HEIGHT - 2)
-            {
-                cell.pressure *= (1.0f - wallDamping * 0.1f);
-            }
-        }
-    }
-    
-    // Special handling for the speaker position to ensure sound propagates properly
-    // Re-add the input at the speaker position after the update
-    if (speakerIdxX > 0 && speakerIdxX < GRID_WIDTH - 1 && 
-        speakerIdxY > 0 && speakerIdxY < GRID_HEIGHT - 1) {
-        cells[speakerIdx].pressure += scaledInput * 0.5f;
-    }
-    
-    // Copy pressure field to grid for visualization
-    for (int i = 0; i < GRID_WIDTH * GRID_HEIGHT; ++i) {
-        grid[i] = cells[i].pressure;
-    }
-}
-
-void Chamber::handleWallReflection(int x, int y)
-{
-    const int idx = y * GRID_WIDTH + x;
-    auto& cell = cells[idx];
-    
-    // Apply wall reflection based on wall reflectivity
-    if (x == 1) // Left wall
-    {
-        cell.velocityX = -cell.velocityX * wallReflectivity;
-    }
-    else if (x == GRID_WIDTH - 2) // Right wall
-    {
-        cell.velocityX = -cell.velocityX * wallReflectivity;
-    }
-    
-    if (y == 1) // Top wall
-    {
-        cell.velocityY = -cell.velocityY * wallReflectivity;
-    }
-    else if (y == GRID_HEIGHT - 2) // Bottom wall
-    {
-        cell.velocityY = -cell.velocityY * wallReflectivity;
-    }
-    
-    // Apply additional damping at walls
-    cell.pressure *= (1.0f - wallDamping * 0.1f);
-}
-
-void Chamber::handleZoneRefraction(int x, int y)
-{
-    const int idx = y * GRID_WIDTH + x;
-    auto& cell = cells[idx];
-    
-    // Check neighboring cells to find zone boundaries
-    int neighbors[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
-    
-    for (auto& neighbor : neighbors)
-    {
-        int nx = x + neighbor[0];
-        int ny = y + neighbor[1];
-        
-        if (nx >= 0 && nx < GRID_WIDTH && ny >= 0 && ny < GRID_HEIGHT)
-        {
-            int nIdx = ny * GRID_WIDTH + nx;
-            auto& neighborCell = cells[nIdx];
-            
-            if (neighborCell.zoneId != cell.zoneId)
-            {
-                // Calculate impedance ratio
-                float z1 = cell.impedance;
-                float z2 = neighborCell.impedance;
-                
-                // Calculate angle of incidence (simplified to normal incidence)
-                float angle = 0.0f;
-                
-                // Apply reflection and transmission at boundary
-                float reflectionCoeff = PhysicsHelpers::calculateReflectionCoefficient(z1, z2, angle);
-                float transmissionCoeff = PhysicsHelpers::calculateTransmissionCoefficient(z1, z2, angle);
-                
-                // Apply reflection to velocity components
-                if (neighbor[0] != 0) // X boundary
-                {
-                    float reflectedVelocity = cell.velocityX * reflectionCoeff;
-                    float transmittedVelocity = cell.velocityX * transmissionCoeff;
-                    
-                    cell.velocityX = reflectedVelocity;
-                    neighborCell.velocityX = transmittedVelocity;
-                }
-                else if (neighbor[1] != 0) // Y boundary
-                {
-                    float reflectedVelocity = cell.velocityY * reflectionCoeff;
-                    float transmittedVelocity = cell.velocityY * transmissionCoeff;
-                    
-                    cell.velocityY = reflectedVelocity;
-                    neighborCell.velocityY = transmittedVelocity;
-                }
-                
-                // Apply frequency-dependent attenuation
-                for (int band = 0; band < NUM_FREQUENCY_BANDS; ++band)
-                {
-                    float normalizedFreq = static_cast<float>(band) / NUM_FREQUENCY_BANDS;
-                    float attenuation = PhysicsHelpers::calculateFrequencyAttenuation(z1, z2, normalizedFreq);
-                    
-                    neighborCell.frequencyBands[band] = cell.frequencyBands[band] * attenuation;
-                    neighborCell.frequencyPhases[band] = cell.frequencyPhases[band];
-                }
-            }
-        }
-    }
-}
-
-void Chamber::applyFrequencyEffects()
-{
-    // Apply frequency-dependent effects to each cell
-    for (int y = 1; y < GRID_HEIGHT - 1; ++y)
-    {
-        for (int x = 1; x < GRID_WIDTH - 1; ++x)
-        {
-            int idx = y * GRID_WIDTH + x;
-            auto& cell = cells[idx];
-            
-            if (cell.isWall)
-                continue;
-            
-            // Apply frequency-dependent attenuation
-            for (int band = 0; band < NUM_FREQUENCY_BANDS; ++band)
-            {
-                // Higher frequencies attenuate more in denser media
-                float frequencyFactor = (band + 1.0f) / NUM_FREQUENCY_BANDS;
-                float attenuationFactor = 1.0f - (cell.density * 0.01f * frequencyFactor);
-                
-                // Ensure attenuation factor is within reasonable bounds
-                attenuationFactor = std::max(0.9f, attenuationFactor);
-                
-                // Apply attenuation
-                cell.frequencyBands[band] *= attenuationFactor;
-            }
-            
-            // Reconstruct pressure from frequency bands
-            // This is a simplified approach - in a real implementation, you'd use inverse FFT
-            float pressureContribution = 0.0f;
-            for (int band = 0; band < NUM_FREQUENCY_BANDS; ++band)
-            {
-                pressureContribution += cell.frequencyBands[band] * 0.1f;
-            }
-            
-            // Add frequency contribution to pressure (small amount to avoid overwhelming the simulation)
-            cell.pressure += pressureContribution * 0.01f;
-        }
-    }
-}
-
-void Chamber::updateCellProperties()
-{
-    // Set default properties for all cells
-    for (int y = 0; y < GRID_HEIGHT; ++y)
-    {
-        for (int x = 0; x < GRID_WIDTH; ++x)
-        {
-            int idx = y * GRID_WIDTH + x;
-            auto& cell = cells[idx];
-            
-            // Reset cell properties
-            cell.pressure = 0.0f;
-            cell.velocityX = 0.0f;
-            cell.velocityY = 0.0f;
-            cell.isWall = (x == 0 || x == GRID_WIDTH - 1 || y == 0 || y == GRID_HEIGHT - 1);
-            cell.isZoneBoundary = false;
-            cell.zoneId = -1;
-            
-            // Default medium properties
-            cell.density = mediumDensity;
-            cell.soundSpeed = PhysicsHelpers::calculateSoundSpeed(mediumDensity);
-            cell.impedance = PhysicsHelpers::calculateAcousticImpedance(mediumDensity);
-            cell.damping = PhysicsHelpers::calculateDamping(mediumDensity) * 0.1f; // Reduce damping
-            
-            // Initialize frequency domain data
-            cell.frequencyBands.resize(NUM_FREQUENCY_BANDS, 0.0f);
-            cell.frequencyPhases.resize(NUM_FREQUENCY_BANDS, 0.0f);
-        }
-    }
-    
-    // Apply zone properties
-    for (size_t zoneIndex = 0; zoneIndex < zones.size(); ++zoneIndex)
-    {
-        const auto& zone = zones[zoneIndex];
-        
-        // Convert normalized coordinates to grid indices
-        int zoneX1 = static_cast<int>(zone->x1 * GRID_WIDTH);
-        int zoneY1 = static_cast<int>(zone->y1 * GRID_HEIGHT);
-        int zoneX2 = static_cast<int>(zone->x2 * GRID_WIDTH);
-        int zoneY2 = static_cast<int>(zone->y2 * GRID_HEIGHT);
-        
-        // Ensure indices are within grid bounds
-        zoneX1 = std::max(1, std::min(zoneX1, GRID_WIDTH - 2));
-        zoneY1 = std::max(1, std::min(zoneY1, GRID_HEIGHT - 2));
-        zoneX2 = std::max(1, std::min(zoneX2, GRID_WIDTH - 2));
-        zoneY2 = std::max(1, std::min(zoneY2, GRID_HEIGHT - 2));
-        
-        // Ensure x1 <= x2 and y1 <= y2
-        if (zoneX1 > zoneX2) std::swap(zoneX1, zoneX2);
-        if (zoneY1 > zoneY2) std::swap(zoneY1, zoneY2);
-        
-        // Set properties for cells within the zone
-        for (int cellY = zoneY1; cellY <= zoneY2; ++cellY)
-        {
-            for (int cellX = zoneX1; cellX <= zoneX2; ++cellX)
-            {
-                int idx = cellY * GRID_WIDTH + cellX;
-                auto& cell = cells[idx];
-                
-                // Set zone properties
-                cell.density = zone->density;
-                cell.soundSpeed = PhysicsHelpers::calculateSoundSpeed(zone->density);
-                cell.impedance = PhysicsHelpers::calculateAcousticImpedance(zone->density);
-                cell.damping = PhysicsHelpers::calculateDamping(zone->density) * 0.1f; // Reduce damping
-                cell.zoneId = static_cast<int>(zoneIndex);
-                
-                // Check if this cell is at a zone boundary
-                if (cellX == zoneX1 || cellX == zoneX2 || cellY == zoneY1 || cellY == zoneY2)
-                {
-                    cell.isZoneBoundary = true;
-                }
-            }
-        }
-    }
-}
-
-void Chamber::setMicrophonePosition(int index, float x, float y)
-{
-    if (index >= 0 && index < 3)
-    {
-        micPositions[index] = {x, y};
-    }
-}
-
-void Chamber::setSpeakerPosition(float x, float y)
-{
-    // Store old position
-    int oldSpeakerIdxX = static_cast<int>(speakerX * GRID_WIDTH);
-    int oldSpeakerIdxY = static_cast<int>(speakerY * GRID_HEIGHT);
-    int oldSpeakerIdx = oldSpeakerIdxY * GRID_WIDTH + oldSpeakerIdxX;
-    
-    // Clamp values to 0-1 range
-    speakerX = juce::jlimit(0.0f, 1.0f, x);
-    speakerY = juce::jlimit(0.0f, 1.0f, y);
-    
-    // Calculate new speaker position
-    int newSpeakerIdxX = static_cast<int>(speakerX * GRID_WIDTH);
-    int newSpeakerIdxY = static_cast<int>(speakerY * GRID_HEIGHT);
-    int newSpeakerIdx = newSpeakerIdxY * GRID_WIDTH + newSpeakerIdxX;
-    
-    // Only clear the old speaker position to stop sound from continuing there
-    if (oldSpeakerIdx >= 0 && oldSpeakerIdx < GRID_WIDTH * GRID_HEIGHT && oldSpeakerIdx != newSpeakerIdx) {
-        // Clear a small area around the old speaker position
-        for (int dy = -3; dy <= 3; dy++) {
-            for (int dx = -3; dx <= 3; dx++) {
-                int y = oldSpeakerIdxY + dy;
-                int x = oldSpeakerIdxX + dx;
-                if (x >= 0 && x < GRID_WIDTH && y >= 0 && y < GRID_HEIGHT) {
-                    int idx = y * GRID_WIDTH + x;
-                    cells[idx].pressure = 0.0f;
-                    cells[idx].velocityX = 0.0f;
-                    cells[idx].velocityY = 0.0f;
-                }
-            }
-        }
-    }
-}
-
-float Chamber::getMicrophoneOutput(int index) const
-{
-    if (index >= 0 && index < 3)
-    {
-        const auto& pos = micPositions[index];
-        
-        // Get the raw pressure at the microphone position
-        float pressure = sampleGrid(pos.x, pos.y);
-        
-        // Apply a simple smoothing filter to reduce digital artifacts
-        // This simulates the frequency response of a real microphone
-        static float lastSamples[3][4] = {{0.0f}};
-        
-        // Simple 4-point moving average filter
-        float filteredOutput = (pressure + lastSamples[index][0] + lastSamples[index][1] + lastSamples[index][2]) * 0.25f;
-        
-        // Update the filter buffer
-        lastSamples[index][2] = lastSamples[index][1];
-        lastSamples[index][1] = lastSamples[index][0];
-        lastSamples[index][0] = pressure;
-        
-        // Apply a gentle soft-clipping to prevent harsh digital distortion
-        filteredOutput = std::tanh(filteredOutput * 0.8f);
-        
-        return filteredOutput;
-    }
-    return 0.0f;
-}
-
-float Chamber::sampleGrid(float x, float y) const
-{
-    // Bilinear interpolation of pressure field
-    float gx = x * (GRID_WIDTH - 1);
-    float gy = y * (GRID_HEIGHT - 1);
-    
-    int x0 = static_cast<int>(gx);
-    int y0 = static_cast<int>(gy);
-    int x1 = x0 + 1;
-    int y1 = y0 + 1;
-    
-    // Clamp to valid grid indices
-    x0 = std::max(0, std::min(x0, GRID_WIDTH - 1));
-    x1 = std::max(0, std::min(x1, GRID_WIDTH - 1));
-    y0 = std::max(0, std::min(y0, GRID_HEIGHT - 1));
-    y1 = std::max(0, std::min(y1, GRID_HEIGHT - 1));
-    
-    float fx = gx - x0;
-    float fy = gy - y0;
-    
-    float v00 = cells[y0 * GRID_WIDTH + x0].pressure;
-    float v10 = cells[y0 * GRID_WIDTH + x1].pressure;
-    float v01 = cells[y1 * GRID_WIDTH + x0].pressure;
-    float v11 = cells[y1 * GRID_WIDTH + x1].pressure;
-    
-    float v0 = v00 * (1 - fx) + v10 * fx;
-    float v1 = v01 * (1 - fx) + v11 * fx;
-    
-    return v0 * (1 - fy) + v1 * fy;
-}
-
-bool Chamber::isCellAtZoneBoundary(int x, int y) const
-{
-    if (x <= 0 || x >= GRID_WIDTH - 1 || y <= 0 || y >= GRID_HEIGHT - 1)
-        return false;
-        
-    int idx = y * GRID_WIDTH + x;
-    int zoneId = cells[idx].zoneId;
-    
-    // Check neighboring cells
-    int neighbors[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
-    
-    for (auto& neighbor : neighbors)
-    {
-        int nx = x + neighbor[0];
-        int ny = y + neighbor[1];
-        
-        if (nx >= 0 && nx < GRID_WIDTH && ny >= 0 && ny < GRID_HEIGHT)
-        {
-            int nIdx = ny * GRID_WIDTH + nx;
-            if (cells[nIdx].zoneId != zoneId)
-                return true;
-        }
-    }
-    
-    return false;
+    return defaultMediumDensity;
 }
