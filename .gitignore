@@ -1,0 +1,90 @@
+# Build directories
+/build/
+/Builds/
+/JuceLibraryCode/
+/JUCE/
+/vst3sdk/
+/VSD3_SDK/
+
+# IDE files
+/.vscode/
+/.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+*.VC.VC.opendb
+*.xcworkspace
+*.xcuserstate
+*.xcscheme
+*.plist
+*.entitlements
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+*.DS_Store
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+*.component
+*.vst
+*.vst3
+*.aax
+*.au
+*.rta
+
+# Audio files used for testing
+*.wav
+*.mp3
+*.aif
+*.aiff
+
+# Backup files
+*~
+*.bak
+*.backup
+*.swp
+
+# CMake files
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Testing/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+
+# Keep only the source code
+!/Source/
+!/Resources/
+!/CMakeLists.txt
+!/README.md
