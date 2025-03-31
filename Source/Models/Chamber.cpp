@@ -31,13 +31,12 @@ Chamber::Chamber()
     // Initialize microphone buffers
     for (int i = 0; i < 3; ++i) {
         micBuffers[i].resize(1024, 0.0f);
-        micFrequencyResponses[i] = MicFrequencyBands();
         micFFTData[i].resize(FFT_SIZE, std::complex<float>(0.0f, 0.0f));
         previousPhase[i].resize(FFT_SIZE, 0.0f);
     }
     
     // Initialize FFT-related members
-    inputBuffer.resize(FFT_SIZE, 0.0f);
+    fftInputBuffer.resize(FFT_SIZE, 0.0f);
     fftWorkspace.resize(FFT_SIZE, std::complex<float>(0.0f, 0.0f));
     fftData.resize(FFT_SIZE * 2, 0.0f); // Double size for real/imaginary parts
     fftOutput.resize(FFT_SIZE, 0.0f);
@@ -52,7 +51,8 @@ Chamber::Chamber()
     fftForward = std::make_unique<juce::dsp::FFT>(std::log2(FFT_SIZE));
     fftInverse = std::make_unique<juce::dsp::FFT>(std::log2(FFT_SIZE));
 
-    rayTracer.initialize(this);
+    rayTracer = std::make_unique<RayTracer>();
+    rayTracer->initialize(this);
     
     DebugLogger::logWithCategory("CHAMBER", "Chamber constructor completed");
 }
@@ -62,14 +62,12 @@ Chamber::~Chamber()
     // Clean up any resources
 }
 
-void Chamber::initialize(double sampleRate, float speakerX, float speakerY)
+void Chamber::initialize(float speakerX, float speakerY)
 {
     DebugLogger::logWithCategory("CHAMBER", "Chamber initialize called with sampleRate: " + 
                                  std::to_string(sampleRate) + ", speakerX: " + 
                                  std::to_string(speakerX) + ", speakerY: " + 
                                  std::to_string(speakerY));
-    
-    this->sampleRate = sampleRate;
     setSpeakerPosition(speakerX, speakerY);
     
     // Calculate minimum samples needed for FFT processing
@@ -86,7 +84,7 @@ void Chamber::initialize(double sampleRate, float speakerX, float speakerY)
     samplesSinceLastFFT = 0;
 
     //Recalc rays and store frequency responses
-    micFrequencyResponses = rayTracer.updateRayCache();
+    rayTracer->updateRayCache();
     
     initialized = true;
     
@@ -106,7 +104,7 @@ void Chamber::setSpeakerPosition(float x, float y)
     speakerY = y;
 
     //Recalc rays and store frequency responses
-    micFrequencyResponses = rayTracer.updateRayCache();
+    rayTracer->updateRayCache();
 }
 
 void Chamber::setMicrophonePosition(int index, float x, float y)
@@ -125,13 +123,26 @@ void Chamber::setMicrophonePosition(int index, float x, float y)
     micPositions[index] = {x, y};
 
     //Recalc rays and store frequency responses
-    micFrequencyResponses = rayTracer.updateRayCache();
+    rayTracer->updateRayCache();
 }
 
 void Chamber::setBypassProcessing(bool bypass)
 {
     bypassProcessing = bypass;
 }
+
+void Chamber::setSampleRate(double sampleRate)
+{
+    return;
+    double previousSampleRate = this->sampleRate;
+    this->sampleRate = sampleRate;
+    if (previousSampleRate != sampleRate)
+    {
+        DebugLogger::logWithCategory("CHAMBER", "Setting sample rate to " + std::to_string(sampleRate) + " from " + std::to_string(previousSampleRate));
+        rayTracer->updateRayCache();
+    }
+}
+
 
 void Chamber::processBlock(const float* input, int numSamples)
 {
@@ -140,18 +151,24 @@ void Chamber::processBlock(const float* input, int numSamples)
         DebugLogger::logWithCategory("ERROR", "Chamber not initialized before processBlock call");
         return;
     }
-    
-    if (bypassProcessing)
+    if (!rayTracer->isCacheValid())
     {
-        // If bypass is enabled, just copy the input to the output
-        for (int i = 0; i < 3; ++i) {
-            if (micBuffers[i].size() < static_cast<size_t>(numSamples)) {
-                micBuffers[i].resize(numSamples, 0.0f);
-            }
-            std::copy(input, input + numSamples, micBuffers[i].begin());
-        }
+        DebugLogger::logWithCategory("ERROR", "Ray cache not valid before processBlock call");
         return;
     }
+    inputBuffer.addSamples(input, numSamples);
+    
+    // if (bypassProcessing)
+    // {
+    //     // If bypass is enabled, just copy the input to the output
+    //     for (int i = 0; i < 3; ++i) {
+    //         if (micBuffers[i].size() < static_cast<size_t>(numSamples)) {
+    //             micBuffers[i].resize(numSamples, 0.0f);
+    //         }
+    //         std::copy(input, input + numSamples, micBuffers[i].begin());
+    //     }
+    //     return;
+    // }
     
     // Resize microphone buffers if needed
     for (int i = 0; i < 3; ++i) {
@@ -163,9 +180,50 @@ void Chamber::processBlock(const float* input, int numSamples)
     
     // Update current block size
     currentBlockSize = numSamples;
-    
+
+    processAudioForMicrophonesUsingBiquad(input, numSamples);
+
+    for (int i = 0; i < 3; ++i)
+    {
+        outputBuffers[i].addSamples(micBuffers[i].data(), numSamples);
+    }
     // Process audio for each microphone in one pass
-    processAudioForMicrophones(input, numSamples);
+    // processAudioForMicrophones(input, numSamples);
+}
+
+void Chamber::processAudioForMicrophonesUsingBiquad(const float* input, int numSamples)
+{
+    DebugLogger::logWithCategory("CHAMBER", "Processing audio for microphones using biquad");
+
+    std::array<MicFrequencyBands, 3>& micFrequencyResponses = rayTracer->getMicFrequencyResponses();
+    // DebugLogger::logWithCategory("CHAMBER", "using these frequencies: " + micFrequencyResponses[1].toString());
+
+
+    // Copy input to buffer with overlap
+    for (int sampleIdx = 0; sampleIdx < numSamples; ++sampleIdx) {
+        for (int micIdx = 0; micIdx < 3; ++micIdx)
+        {
+            double refInput = input[sampleIdx];
+            double output = input[sampleIdx];
+
+            for (int bandIdx = 0; bandIdx < micFrequencyResponses[micIdx].bands.size(); ++bandIdx)
+            {
+                double filterOutput = micFrequencyResponses[micIdx].bands[bandIdx].processSample(output);
+
+                // Add this band's contribution to the output
+                output += (filterOutput - input[sampleIdx]);// * micFrequencyResponses[micIdx].bands[bandIdx].gain;
+            }
+
+            // if (output != 0)
+            // {
+            //     int* ptr = nullptr;
+            //     *ptr = 10;
+            // }
+
+            micBuffers[micIdx][sampleIdx] = static_cast<float>(output);
+        }
+    }
+    DebugLogger::logWithCategory("CHAMBER", "Audio processing for microphones using biquad completed, Mic 2 Buffer: " + std::to_string(micBuffers[2][0]));
 }
 
 void Chamber::processAudioForMicrophones(const float* input, int numSamples)
@@ -174,7 +232,7 @@ void Chamber::processAudioForMicrophones(const float* input, int numSamples)
     
     // Copy input to buffer with overlap
     for (int i = 0; i < numSamples; ++i) {
-        inputBuffer[fftBufferPos] = input[i];
+        fftInputBuffer[fftBufferPos] = input[i];
         fftBufferPos = (fftBufferPos + 1) % FFT_SIZE;
     }
     
@@ -184,6 +242,7 @@ void Chamber::processAudioForMicrophones(const float* input, int numSamples)
     // Only process FFT if we've accumulated enough samples since the last processing
     // This ensures we have enough data for proper frequency domain conversion
     bool shouldProcessFFT = samplesSinceLastFFT >= minSamplesForFFT;
+    std::array<MicFrequencyBands, 3> micFrequencyResponses = rayTracer->getMicFrequencyResponses();
     
     if (shouldProcessFFT) {
         DebugLogger::logWithCategory("CHAMBER", "Processing FFT after " + 
@@ -197,7 +256,7 @@ void Chamber::processAudioForMicrophones(const float* input, int numSamples)
             // Prepare FFT input buffer with windowing
             for (int i = 0; i < FFT_SIZE; ++i) {
                 int bufferIndex = (fftBufferPos - numSamples + i + FFT_SIZE) % FFT_SIZE;
-                fftWorkspace[i] = std::complex<float>(inputBuffer[bufferIndex] * windowFunction[i], 0.0f);
+                fftWorkspace[i] = std::complex<float>(fftInputBuffer[bufferIndex] * windowFunction[i], 0.0f);
             }
             
             // Perform forward FFT
@@ -342,7 +401,7 @@ int Chamber::addZone(float x, float y, float width, float height, float density)
     zones.push_back(std::move(zone));
 
     //Recalc rays and store frequency responses
-    micFrequencyResponses = rayTracer.updateRayCache();
+    rayTracer->updateRayCache();
 
     DebugLogger::logWithCategory("CHAMBER", "Zone added");
     
@@ -358,7 +417,7 @@ void Chamber::removeZone(int index)
         zones.erase(zones.begin() + index);
 
         //Recalc rays and store frequency responses
-        micFrequencyResponses = rayTracer.updateRayCache();
+        rayTracer->updateRayCache();
     }
 }
 
@@ -372,7 +431,7 @@ void Chamber::setZoneDensity(int index, float density)
         zones[index]->density = density;
 
         //Recalc rays and store frequency responses
-        micFrequencyResponses = rayTracer.updateRayCache();
+        rayTracer->updateRayCache();
     }
 }
 
@@ -390,7 +449,7 @@ void Chamber::setZoneBounds(int index, float x, float y, float width, float heig
         zones[index]->height = juce::jlimit(0.0f, 1.0f - zones[index]->y, height);
 
         //Recalc rays and store frequency responses
-        micFrequencyResponses = rayTracer.updateRayCache();
+        rayTracer->updateRayCache();
     }
 }
 
@@ -411,7 +470,7 @@ void Chamber::setDefaultMediumDensity(float density)
     defaultMediumDensity = density;
 
     //Recalc rays and store frequency responses
-    micFrequencyResponses = rayTracer.updateRayCache();
+    rayTracer->updateRayCache();
 }
 
 float Chamber::getDefaultMediumDensity() const

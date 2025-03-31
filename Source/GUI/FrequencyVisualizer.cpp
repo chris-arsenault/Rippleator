@@ -43,7 +43,7 @@ void FrequencyVisualizer::paint(juce::Graphics& g)
     {
         float x = bounds.getX() + i * barWidth;
 
-        float center = (frequencyBands.bands[i].minFrequency + frequencyBands.bands[i].maxFrequency) / 2;
+        float center = frequencyBands.bands[i].centerFrequency;
         if (center > 1000)
         {
             center /= 1000;

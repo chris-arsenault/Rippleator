@@ -6,6 +6,7 @@
 #include <array>
 #include "Zone.h"
 #include "RayTracer.h"
+#include "CircularBuffer.h"
 
 /**
  * Chamber class that simulates a 2D rectangular chamber filled with multiple fluid/gas zones.
@@ -21,11 +22,12 @@ public:
     Chamber();
     ~Chamber();
     
-    void initialize(double sampleRate, float speakerX, float speakerY);
+    void initialize(float speakerX, float speakerY);
     void processBlock(const float* input, int numSamples);
     void setMicrophonePosition(int index, float x, float y);
     float getMicrophoneOutput(int index) const;
     void getMicrophoneOutputBlock(int micIndex, float* outputBuffer, int numSamples) const;
+    [[nodiscard]] const double getSampleRate() const { return sampleRate; }
     
     // Parameter setters
     void setMediumDensity(float density);
@@ -38,42 +40,48 @@ public:
     void setZoneProperty(int index, float density);
     void setZoneDensity(int zoneId, float density);
     void setZoneBounds(int zoneId, float x1, float y1, float x2, float y2);
-    const std::vector<std::unique_ptr<Zone>>& getZones() const;
+    [[nodiscard]] const std::vector<std::unique_ptr<Zone>>& getZones() const;
     
     // Microphone management
-    const std::array<juce::Point<float>, 3>& getMicrophonePositions() const { return micPositions; }
+    [[nodiscard]] const std::array<juce::Point<float>, 3>& getMicrophonePositions() const { return micPositions; }
     
     // Speaker position
-    float getSpeakerX() const { return speakerX; }
-    float getSpeakerY() const { return speakerY; }
+    [[nodiscard]] float getSpeakerX() const { return speakerX; }
+    [[nodiscard]] float getSpeakerY() const { return speakerY; }
     void setSpeakerPosition(float x, float y);
     juce::Point<float> getSpeakerPosition() const;
 
-    const std::vector<Ray>& getCachedRays() const { return rayTracer.getCachedRays(); }
+    const std::vector<Ray>& getCachedRays() const { return rayTracer->getCachedRays(); }
     bool isInitialized() const;
     void setDefaultMediumDensity(float density);
     float getDefaultMediumDensity() const;
     juce::Point<float> getMicrophonePosition(int index) const;
     
     // Getter for microphone frequency responses (for visualization)
-    const std::array<MicFrequencyBands, 3>& getMicFrequencyResponses() const { return micFrequencyResponses; }
+    const std::array<MicFrequencyBands, 3>& getMicFrequencyResponses() const { return rayTracer->getMicFrequencyResponses(); }
     
     // Getter for microphone output buffer (for visualization)
     const std::array<std::vector<float>, 3>& getMicBuffers() const { return micBuffers; }
+    CircularBuffer& getInputBuffer() { return inputBuffer; }
+    CircularBuffer& getOutputBuffer(int index) { return outputBuffers[index]; }
 
     void setBypassProcessing(bool bypass);
+
+    void setSampleRate(double sampleRate);
 
 private:
 
     void processAudioForMicrophones(const float* input, int numSamples);
+    void processAudioForMicrophonesUsingBiquad(const float* input, int numSamples);
+
+    //In/Out buffers
+    CircularBuffer inputBuffer;
+    std::array<CircularBuffer, 3> outputBuffers;
     
     // Ray tracing
     float defaultMediumDensity;
-    RayTracer rayTracer;
-    
-    // Microphone frequency responses
-    std::array<MicFrequencyBands, 3> micFrequencyResponses;
-    
+    std::unique_ptr<RayTracer> rayTracer;
+
     // FFT data for each microphone
     std::array<std::vector<std::complex<float>>, 3> micFFTData;
     
@@ -99,7 +107,7 @@ private:
     std::unique_ptr<juce::dsp::FFT> fftInverse;
     
     // Input buffer for FFT processing
-    std::vector<float> inputBuffer;
+    std::vector<float> fftInputBuffer;
     std::vector<std::complex<float>> fftWorkspace;
     
     bool initialized;
@@ -120,7 +128,6 @@ private:
     int fftBufferPos;
 
     // Audio processing
-    std::vector<float> fftInputBuffer;      // Buffer for FFT input
     std::vector<float> fftTimeBuffer;       // Time domain buffer
     std::vector<float> fftFrequencyBuffer;  // Frequency domain buffer
     

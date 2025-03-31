@@ -1,5 +1,7 @@
 #include "VisualizationsTab.h"
 
+#include <DebugLogger.h>
+
 VisualizationsTab::VisualizationsTab(Chamber& chamber)
     : chamber(chamber),
       speakerWaveform("Speaker Input"),
@@ -93,36 +95,22 @@ void VisualizationsTab::timerCallback()
     speakerFrequency.updateFrequencyBands(speakerBands);
     
     // Update waveform visualizers
-    // Get the latest audio samples from the microphone buffers
-    const auto& micBuffers = chamber.getMicBuffers();
     
     // For each microphone, get the most recent samples and add to visualizer
     for (int i = 0; i < 3; ++i)
     {
-        if (!micBuffers[i].empty())
-        {
-            // Get the most recent samples (up to SAMPLES_PER_UPDATE)
-            int numSamples = std::min(SAMPLES_PER_UPDATE, static_cast<int>(micBuffers[i].size()));
-            int startIdx = static_cast<int>(micBuffers[i].size()) - numSamples;
-            
-            if (startIdx >= 0)
-            {
-                for (int j = 0; j < numSamples; ++j)
-                {
-                    micWaveforms[i].addSample(micBuffers[i][startIdx + j]);
-                }
-            }
-        }
+        // Get the latest audio samples from the microphone buffers
+        std::vector<float> outputSamples;
+        outputSamples.resize(SAMPLES_PER_UPDATE);
+        int readSamples = chamber.getOutputBuffer(i).getSamples(outputSamples.data(), SAMPLES_PER_UPDATE);
+        micWaveforms[i].addSamples(outputSamples.data(), readSamples);
     }
     
     // For speaker waveform, we'll use a simple sine wave for now
-    static float phase = 0.0f;
-    for (int i = 0; i < SAMPLES_PER_UPDATE; ++i)
-    {
-        float sample = 0.5f * std::sin(phase);
-        speakerWaveform.addSample(sample);
-        phase += 0.1f;
-    }
+    std::vector<float> inputSamples;
+    inputSamples.resize(SAMPLES_PER_UPDATE);
+    int readSamples = chamber.getInputBuffer().getSamples(inputSamples.data(), SAMPLES_PER_UPDATE);
+    speakerWaveform.addSamples(inputSamples.data(), readSamples);
 }
 
 void VisualizationsTab::startVisualizations()

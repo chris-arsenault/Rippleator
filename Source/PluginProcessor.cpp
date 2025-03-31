@@ -109,7 +109,7 @@ RippleatorAudioProcessor::RippleatorAudioProcessor()
     // Initialize chamber parameters
     try {
         DebugLogger::logWithCategory("INIT", "Initializing chamber with sample rate: " + std::to_string(getSampleRate()));
-        chamber.initialize(getSampleRate(), 0.0f, 0.5f);  // Speaker on left wall
+        chamber.initialize(0.0f, 0.5f);  // Speaker on left wall
         DebugLogger::logWithCategory("INIT", "Chamber initialized successfully");
     }
     catch (const std::exception& e) {
@@ -210,7 +210,7 @@ void RippleatorAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBl
                             ", samplesPerBlock: " + std::to_string(samplesPerBlock));
     
     try {
-        chamber.initialize(sampleRate, 0.0f, 0.5f);
+        chamber.initialize(0.0f, 0.5f);
         DebugLogger::logWithCategory("AUDIO", "Chamber reinitialized in prepareToPlay");
         
         // Set the default medium density from the parameter
@@ -258,8 +258,7 @@ void RippleatorAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     }
     
     juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
+    chamber.setSampleRate(getSampleRate());
     
     try {
         // Only log occasionally to avoid filling the log file
@@ -281,26 +280,11 @@ void RippleatorAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
         // Generate test tones (440Hz, 880Hz, and 1760Hz)
         for (int i = 0; i < numSamples; ++i)
         {
-            // Calculate sine waves at three frequencies
-            float sine440 = 0.8f * std::sin(2.0 * M_PI * phase440Hz);
-            float sine880 = 0.6f * std::sin(2.0 * M_PI * phase880Hz);
-            float sine1760 = 0.4f * std::sin(2.0 * M_PI * phase1760Hz);
-            
-            // Mix the three sine waves
-            testToneData[i] = sine440;// + sine880 + sine1760;
-            
-            // Prevent clipping
-            testToneData[i] = std::tanh(testToneData[i]);
-            
+            testToneData[i] =  2.0f * (phase440Hz - std::floor(phase440Hz + 0.5f));
             // Update phases
             phase440Hz += 440.0 / sampleRate;
             if (phase440Hz >= 1.0) phase440Hz -= 1.0;
-            
-            phase880Hz += 880.0 / sampleRate;
-            if (phase880Hz >= 1.0) phase880Hz -= 1.0;
-            
-            phase1760Hz += 1760.0 / sampleRate;
-            if (phase1760Hz >= 1.0) phase1760Hz -= 1.0;
+
         }
 
         // Apply level decay to all microphones

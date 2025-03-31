@@ -27,10 +27,6 @@ void RayTracer::initialize(Chamber* parentChamber)
     chamber = parentChamber;
     initialized = true;
 
-//    updateRayCache();
-//    updateMicrophoneFrequencyResponses();
-
-
     DebugLogger::logWithCategory("TRACER", "TRACER initialization completed");
 }
 
@@ -395,9 +391,13 @@ void RayTracer::updateRayFrequencies(Ray& ray, const Intersection& intersection)
     DebugLogger::logWithCategory("RAY", "Ray frequencies updated");
 }
 
-
-std::array<MicFrequencyBands, 3>  RayTracer::updateRayCache()
+void  RayTracer::updateRayCache()
 {
+    if (isProcessing)
+    {
+        DebugLogger::logWithCategory("TRACER", "Skipping ray cache update because it's already being processed");
+        return;
+    }
     DebugLogger::logWithCategory("TRACER", "Updating ray cache");
     isProcessing = true;
 
@@ -434,7 +434,7 @@ std::array<MicFrequencyBands, 3>  RayTracer::updateRayCache()
         std::vector<Ray> raysToProcess = {primaryRay};
 
         // Limit the number of reflections to prevent infinite loops
-        const int MAX_REFLECTIONS = 10;
+        const int MAX_REFLECTIONS = 100;
         int reflectionCount = 0;
 
         while (!raysToProcess.empty() && reflectionCount < MAX_REFLECTIONS)
@@ -469,22 +469,16 @@ std::array<MicFrequencyBands, 3>  RayTracer::updateRayCache()
     raysCacheValid = true;
     DebugLogger::logWithCategory("TRACER", "Ray cache updated");
 
-    return calculateMicrophoneFrequencyResponses();
+    calculateMicrophoneFrequencyResponses();
 }
 
-std::array<MicFrequencyBands, 3> RayTracer::calculateMicrophoneFrequencyResponses()
+void RayTracer::calculateMicrophoneFrequencyResponses()
 {
     DebugLogger::logWithCategory("TRACER", "Updating microphone frequency responses");
-
-    // Make sure ray cache is up to date
-    if (!raysCacheValid) {
-        updateRayCache();
-    }
 
     std::array<juce::Point<float>, 3> micPositions = chamber->getMicrophonePositions();
     float speakerX = chamber->getSpeakerX();
     float speakerY = chamber->getSpeakerY();
-    std::array<MicFrequencyBands, 3> micFrequencyResponses;
     DebugLogger::logWithCategory("TRACER", "Init microphone frequency responses");
 
     // Pre-calculate all ray contributions to each microphone
@@ -494,7 +488,7 @@ std::array<MicFrequencyBands, 3> RayTracer::calculateMicrophoneFrequencyResponse
         juce::Point<float> micPosition = micPositions[mic];
 
         // Reset frequency response for this microphone
-        micFrequencyResponses[mic].reset();
+        micFrequencyResponses[mic].reset(0.0f);
 
         // Direct ray from speaker to microphone
         juce::Point<float> speakerPosition(speakerX, speakerY);
@@ -517,7 +511,7 @@ std::array<MicFrequencyBands, 3> RayTracer::calculateMicrophoneFrequencyResponse
             float attenuation = 1.0f / (1.0f + directRay.distance * 5.0f);
 
             // Apply direct contribution to all frequency bands
-            micFrequencyResponses[mic] + attenuation;
+            micFrequencyResponses[mic] += attenuation;
         }
 
         // Add contributions from all cached rays to specific frequency bands
@@ -534,9 +528,14 @@ std::array<MicFrequencyBands, 3> RayTracer::calculateMicrophoneFrequencyResponse
 
         // Normalize frequency responses to avoid excessive gain
         micFrequencyResponses[mic].downwardNormalize();
+        micFrequencyResponses[mic].bands[0].value = 0;
+        micFrequencyResponses[mic].bands[1].value = 0;
+        micFrequencyResponses[mic].bands[2].value = 0;
+        micFrequencyResponses[mic].calculateBiquadCoefficients(chamber->getSampleRate());
     }
 
     isProcessing = false;
     DebugLogger::logWithCategory("TRACER", "Microphone frequency responses updated");
-    return micFrequencyResponses;
+   // DebugLogger::logWithCategory("TRACER", "Frequency response coefficients calculated: " + micFrequencyResponses[1].toString());
 }
+//processBlock called (iteration 1)

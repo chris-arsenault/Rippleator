@@ -51,6 +51,10 @@ void WaveformVisualizer::paint(juce::Graphics& g)
     {
         float x = bounds.getX() + i * xScale;
         float y = centerY - samples[i] * halfHeight;
+        if (std::isnan(y))
+        {
+            y = 0;
+        }
         
         if (!pathStarted)
         {

@@ -86,6 +86,7 @@ public:
      */
     static void logWithCategory(const std::string& category, const std::string& message)
     {
+        return;
         log("[" + category + "] " + message);
     }
     

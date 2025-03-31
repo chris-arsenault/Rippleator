@@ -12,7 +12,6 @@ class WaveformVisualizer : public juce::Component,
 public:
     WaveformVisualizer(const juce::String& name = "Waveform");
     ~WaveformVisualizer() override;
-    
     void paint(juce::Graphics&) override;
     void resized() override;
     void timerCallback() override;

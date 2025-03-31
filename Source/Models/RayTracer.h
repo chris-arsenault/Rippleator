@@ -24,6 +24,7 @@ struct Ray {
         : origin(origin), direction(direction) {
         // Initialize frequency bands to 1.0
         frequencyBands = MicFrequencyBands();
+        frequencyBands.reset(1.0f);
     }
 };
 
@@ -48,7 +49,8 @@ public:
 
     bool RayTracer::isCacheValid() const { return initialized && raysCacheValid && !isProcessing; }
     const std::vector<Ray>& getCachedRays() const { return cachedRays; }
-    std::array<MicFrequencyBands, 3> updateRayCache();
+    std::array<MicFrequencyBands, 3>& getMicFrequencyResponses()  { return micFrequencyResponses; }
+    void updateRayCache();
 
 private:
     static constexpr int RAYS_PER_REFLECTION = 3;
@@ -63,6 +65,8 @@ private:
     bool raysCacheValid;
     std::vector<Ray> cachedRays;
 
+    std::array<MicFrequencyBands, 3> micFrequencyResponses;
+
     void performFrequencyAnalysis(float input);
     void applyFrequencyEffects();
     void handleWallReflection(int x, int y);
@@ -75,7 +79,7 @@ private:
     float calculateRayContribution(const Ray& ray, const juce::Point<float>& micPosition) const;
     std::vector<Ray> generateReflectionRays(const Ray& ray, const Intersection& intersection) const;
     void updateRayFrequencies(Ray& ray, const Intersection& intersection) const;
-    std::array<MicFrequencyBands, 3> calculateMicrophoneFrequencyResponses();
+    void calculateMicrophoneFrequencyResponses();
 
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(RayTracer)
